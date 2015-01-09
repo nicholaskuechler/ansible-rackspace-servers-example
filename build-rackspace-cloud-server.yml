@@ -1,0 +1,119 @@
+# Ansible playbook example for building Rackspace Cloud Servers with
+# Rackspace Cloud DNS and ansible roles to install packages, inside of a
+# virtualenv.
+#
+# Author: Nicholas Kuechler - https://github.com/nicholaskuechler
+#
+---
+- name: Create a Rackspace Cloud Server
+  hosts: localhost
+  user: root
+  connection: local
+  gather_facts: False
+
+  vars:
+   # Rackspace Cloud DNS settings:
+   # domain - the domain we will be using for the new server
+   - domain: exampledomain.com
+   # dns_email - admin email address for the new domain name
+   - dns_email: admin@exampledomain.com
+   # this is the name we will see in the Rackspace Cloud control panel, and 
+   # this will also be the hostname of our new server
+   - name: server01.exampledomain.com
+   # the flavor specifies the server side of our instance
+   - flavor: performance1-1
+   # the image specifies the linux distro we will use for our server
+   - image: 0766e5df-d60a-4100-ae8c-07f27ec0148f
+   # the region is the Rackspace Cloud region we want to build our server in
+   - region: DFW
+   # credentials specifies the location of our pyrax configuration file we
+   # created earlier
+   - credentials: /home/username/.rackspace_cloud_credentials
+   # I like to drop in my SSH pub key automatically when I create the server
+   # so that I can ssh in without a password
+   # Note: Instead of dropping in a file, you can use a stored Rackspace key
+   # when you build the server by editing key_name below to your key's name.
+   - files:
+        /root/.ssh/authorized_keys: /home/username/.ssh/id_rsa.pub
+
+  tasks:
+    - name: Rackspace cloud server build request
+      local_action:
+        module: rax
+        credentials: "{{ credentials }}"
+        name: "{{ name }}"
+        flavor: "{{ flavor }}"
+        image: "{{ image }}"
+        region: "{{ region }}"
+        # key_name - specifies the Rackspace cloud key to add to the server
+        # upon creation
+        #key_name: my_rackspace_key
+        files: "{{ files }}"
+        # wait - specifies that we should wait until the server is fully
+        # created before proceeding
+        wait: yes
+        # state - present means we want our server to exist
+        state: present
+        # specify that we want both a public network (public IPv4) and
+        # a private network (10. aka service net)
+        networks:
+          - private
+          - public
+        # group - specifies metadata to add to the new server with a
+        # server group
+        #group: deploy
+      # register is an ansible term to save the output in to a variable
+      # named rax
+      register: rax
+
+    # Adds a cloud server to an ansible host group for later use in
+    # other tasks and roles.
+    - name: Add new cloud server to host group
+      local_action:
+        module: add_host
+        hostname: "{{ item.name }}"
+        ansible_ssh_host: "{{ item.rax_accessipv4 }}"
+        ansible_ssh_user: root
+        groupname: deploy
+      with_items: rax.instances
+
+    # A task to add a new domain to Rackspace Cloud DNS
+    - name: DNS - Domain create request
+      local_action:
+        module: rax_dns
+        credentials: "{{ credentials }}"
+        name: "{{ domain }}"
+        email: "{{ dns_email }}"
+      register: rax_dns
+
+    # A task to create a DNS A record in Rackspace Cloud DNS
+    - name: DNS - Create A record
+      local_action:
+        module: rax_dns_record
+        credentials: "{{ credentials }}"
+        domain: "{{ domain }}"
+        name: "{{ name }}"
+        data: "{{ item.rax_accessipv4 }}"
+        type: A
+      with_items: rax.instances
+      register: a_record
+
+    # A task to create a reverse DNS / PTR record in Rackspace Cloud DNS
+    - name: DNS - Create PTR record
+      local_action:
+        module: rax_dns_record
+        credentials: "{{ credentials }}"
+        server: "{{ item.id }}"
+        name: "{{ name }}"
+        region: "{{ region }}"
+        data: "{{ item.rax_accessipv4 }}"
+        type: PTR
+      with_items: rax.instances
+      register: ptr_record
+
+- name: Install base packages to new cloud server
+  hosts: deploy
+  user: root
+  gather_facts: True
+  roles:
+    - base
